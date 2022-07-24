@@ -1,12 +1,17 @@
+//! Usage: `./linkchecker http://url-to-check.com`
+//! If all links are HTTP 200, returns 0 and exits silently.
+//! If a broken link is found, prints one link per line and returns 1.
 use anyhow::anyhow;
 use futures::{stream, StreamExt};
 use regex::Regex;
+use reqwest::StatusCode;
 use std::{borrow::Cow, env};
 
 lazy_static::lazy_static! {
     static ref LINK_RE: Regex = Regex::new(r#"href ?= ?"([^"]+)""#).unwrap();
 }
 
+/// How many concurrent HTTP requests can be in flight at once.
 const CONCURRENCY_LIMIT: usize = 10;
 
 #[tokio::main]
@@ -15,23 +20,30 @@ async fn main() {
         let url = env::args()
             .nth(1)
             .ok_or_else(|| anyhow!("missing argument 1 (the URL to check for dead links)"))?;
+
         let html = reqwest::get(url).await?.text().await?;
-        stream::iter(find_links(&html))
-            .for_each_concurrent(CONCURRENCY_LIMIT, |link| async move {
-                let link: &str = &link;
-                let resp = match reqwest::get(link).await {
-                    Ok(resp) => resp,
-                    Err(e) => {
-                        println!("{link}: {e}");
-                        return;
-                    }
-                };
-                let status = resp.status();
-                if status != reqwest::StatusCode::OK {
-                    println!("{link}: {status}");
+        let all_links = find_links(&html);
+        let broken_links: Vec<_> = stream::iter(all_links)
+            .map(|link| async move {
+                match reqwest::get(link.to_string()).await {
+                    Ok(resp) if resp.status() == StatusCode::OK => None,
+                    Ok(_) => Some(link),
+                    Err(_) => Some(link),
                 }
             })
-            .await;
+            .buffer_unordered(CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .filter_map(|x| x)
+            .collect();
+
+        if !broken_links.is_empty() {
+            // Print all lines in one call, to avoid getting the lock for stdout once per line.
+            println!("{}", broken_links.join("\n"));
+            std::process::exit(1);
+        }
+
         Ok(())
     }
     if let Err(e) = main_res().await {
