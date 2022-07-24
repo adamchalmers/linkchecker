@@ -1,6 +1,3 @@
-//! Usage: `./linkchecker http://url-to-check.com`
-//! If all links are HTTP 200, returns 0 and exits silently.
-//! If a broken link is found, prints one link per line and returns 1.
 use anyhow::anyhow;
 use futures::{stream, StreamExt};
 use regex::Regex;
@@ -21,9 +18,13 @@ async fn main() {
             .nth(1)
             .ok_or_else(|| anyhow!("missing argument 1 (the URL to check for dead links)"))?;
 
+        // Find all links within the webpage.
         let html = reqwest::get(url).await?.text().await?;
         let all_links = find_links(&html);
+
+        // Find which links are broken.
         let broken_links: Vec<_> = stream::iter(all_links)
+            // Check the HTTP status of each link.
             .map(|link| async move {
                 match reqwest::get(link.to_string()).await {
                     Ok(resp) if resp.status() == StatusCode::OK => None,
@@ -31,6 +32,7 @@ async fn main() {
                     Err(_) => Some(link),
                 }
             })
+            // Make the HTTP requests concurrently.
             .buffer_unordered(CONCURRENCY_LIMIT)
             .collect::<Vec<_>>()
             .await
@@ -39,7 +41,8 @@ async fn main() {
             .collect();
 
         if !broken_links.is_empty() {
-            // Print all lines in one call, to avoid getting the lock for stdout once per line.
+            // One big println is faster than doing many small printlns, because each println call
+            // has to get a lock for stdout. This prevents lines from interleaving each other.
             println!("{}", broken_links.join("\n"));
             std::process::exit(1);
         }
@@ -52,6 +55,7 @@ async fn main() {
     }
 }
 
+/// Finds all HTML links within the given string. Ignores fragment links.
 fn find_links(s: &str) -> impl Iterator<Item = Cow<str>> {
     LINK_RE
         .captures_iter(s)
