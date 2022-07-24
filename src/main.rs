@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use futures::{stream, StreamExt};
 use regex::Regex;
 use reqwest::StatusCode;
-use std::{borrow::Cow, env};
+use std::{borrow::Cow, collections::HashSet, env};
 
 lazy_static::lazy_static! {
     static ref LINK_RE: Regex = Regex::new(r#"href ?= ?"([^"]+)""#).unwrap();
@@ -37,7 +37,7 @@ async fn main() {
             .collect::<Vec<_>>()
             .await
             .into_iter()
-            .filter_map(|x| x)
+            .flatten()
             .collect();
 
         if !broken_links.is_empty() {
@@ -56,12 +56,13 @@ async fn main() {
 }
 
 /// Finds all HTML links within the given string. Ignores fragment links.
-fn find_links(s: &str) -> impl Iterator<Item = Cow<str>> {
+fn find_links(s: &str) -> HashSet<Cow<str>> {
     LINK_RE
         .captures_iter(s)
         .map(|link| link.get(1).unwrap().as_str())
         .filter(|link| !link.starts_with('#'))
         .map(html_escape::decode_html_entities)
+        .collect()
 }
 
 #[cfg(test)]
@@ -71,17 +72,22 @@ mod tests {
     #[test]
     fn test_regex() {
         let s = r#"<p>I learned about extensions when reading the <a href="https://docs.rs/hyper/latest/hyper/struct.Request.html#method.extensions">hyper docs</a>. But"#;
-        let link = find_links(s).next().unwrap();
+        let link = find_links(s);
         assert_eq!(
             link,
-            "https://docs.rs/hyper/latest/hyper/struct.Request.html#method.extensions"
+            HashSet::from([Cow::Borrowed(
+                "https://docs.rs/hyper/latest/hyper/struct.Request.html#method.extensions"
+            )])
         )
     }
 
     #[test]
     fn test_regex_decoded() {
         let s = r#"<a  href="http:&#x2F;&#x2F;127.0.0.1:1111&#x2F;about&#x2F;">About</a>"#;
-        let link = find_links(s).next().unwrap();
-        assert_eq!(link, "http://127.0.0.1:1111/about/")
+        let link = find_links(s);
+        assert_eq!(
+            link,
+            HashSet::from([Cow::Borrowed("http://127.0.0.1:1111/about/")])
+        )
     }
 }
