@@ -1,0 +1,1 @@
+cargo build -q --release && hyperfine --warmup 1 -- ./script
