@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use futures::{stream, StreamExt};
 use regex::Regex;
 use reqwest::StatusCode;
-use std::{borrow::Cow, collections::HashSet, env};
+use std::{borrow::Cow, collections::HashSet, env, sync::Arc};
 
 lazy_static::lazy_static! {
     static ref LINK_RE: Regex = Regex::new(r#"href ?= ?"([^"]+)""#).unwrap();
@@ -18,15 +18,19 @@ async fn main() {
             .nth(1)
             .ok_or_else(|| anyhow!("missing argument 1 (the URL to check for dead links)"))?;
 
+        let client = Arc::new(reqwest::Client::builder().build().unwrap());
+
         // Find all links within the webpage.
-        let html = reqwest::get(url).await?.text().await?;
+        let html = client.get(url).send().await?.text().await?;
         let all_links = find_links(&html);
 
         // Find which links are broken.
+        // TODO(Performance): Split into N queues based upon domain name for better HTTP connection re-use?
         let broken_links: Vec<_> = stream::iter(all_links)
             // Check the HTTP status of each link.
-            .map(|link| async move {
-                match reqwest::get(link.to_string()).await {
+            .map(|link| async {
+                let r = client.get(link.to_string()).send().await;
+                match r {
                     Ok(resp) if resp.status() == StatusCode::OK => None,
                     Ok(_) => Some(link),
                     Err(_) => Some(link),
